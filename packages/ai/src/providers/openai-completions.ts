@@ -75,6 +75,54 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
+// Retry configuration
+const OPENAI_MAX_RETRIES = 3;
+const OPENAI_BASE_DELAY_MS = 1000;
+
+function isOpenAIRetryableError(error: unknown): boolean {
+	if (!error) return false;
+	const message = error instanceof Error ? error.message : String(error);
+	const status = (error as any)?.status || (error as any)?.statusCode || 0;
+
+	// Non-retryable HTTP statuses
+	if (status === 400 || status === 401 || status === 403 || status === 404) return false;
+
+	// Retryable HTTP statuses
+	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) return true;
+
+	// Connection/network errors (LM Studio crash, model reloading, etc.)
+	if (
+		/ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|socket hang up|network|fetch failed|other side closed|connection.*(reset|refused|closed|terminated|aborted)/i.test(
+			message,
+		)
+	)
+		return true;
+
+	// Server-side errors
+	if (/rate.?limit|overloaded|service.?unavailable|resource.?exhausted|server error|internal error/i.test(message))
+		return true;
+
+	return false;
+}
+
+function openAISleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				reject(new Error("aborted"));
+			},
+			{ once: true },
+		);
+	});
+}
+
 export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
@@ -101,6 +149,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			timestamp: Date.now(),
 		};
 
+		for (let attempt = 0; attempt <= OPENAI_MAX_RETRIES; attempt++) {
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const client = createClient(model, context, apiKey, options?.headers);
@@ -308,14 +357,50 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Check if we should retry
+			const isAborted = options?.signal?.aborted;
+			if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
+				const delayMs = Math.min(
+					OPENAI_BASE_DELAY_MS * Math.pow(2, attempt),
+					options?.maxRetryDelayMs ?? 60000,
+				);
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				console.warn(
+					`[openai-completions] Retryable error (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${delayMs}ms: ${errorMsg}`,
+				);
+				try {
+					await openAISleep(delayMs, options?.signal);
+				} catch {
+					// Aborted during sleep — fall through to error
+				}
+				if (options?.signal?.aborted) {
+					// Aborted during sleep, don't retry
+				} else {
+					// Reset output state for retry
+					output.content = [];
+					output.usage = {
+						input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					output.stopReason = "stop";
+					output.errorMessage = undefined;
+					output.timestamp = Date.now();
+					continue;
+				}
+			}
+
 			for (const block of output.content) delete (block as any).index;
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.stopReason = isAborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+			return;
+		}
+		// Success — break out of retry loop
+		break;
 		}
 	})();
 
