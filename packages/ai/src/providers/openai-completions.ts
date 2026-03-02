@@ -102,6 +102,9 @@ function isOpenAIRetryableError(error: unknown): boolean {
 	if (/rate.?limit|overloaded|service.?unavailable|resource.?exhausted|server error|internal error/i.test(message))
 		return true;
 
+	// LM Studio model crash (prompt cache bug, OOM, etc.)
+	if (/model has crashed|exit code/i.test(message)) return true;
+
 	return false;
 }
 
@@ -150,257 +153,258 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 		};
 
 		for (let attempt = 0; attempt <= OPENAI_MAX_RETRIES; attempt++) {
-		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = createClient(model, context, apiKey, options?.headers);
-			const params = buildParams(model, context, options);
-			options?.onPayload?.(params);
-			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
-			stream.push({ type: "start", partial: output });
+			try {
+				const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+				const client = createClient(model, context, apiKey, options?.headers);
+				const params = buildParams(model, context, options);
+				options?.onPayload?.(params);
+				const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
+				stream.push({ type: "start", partial: output });
 
-			let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
-			const blocks = output.content;
-			const blockIndex = () => blocks.length - 1;
-			const finishCurrentBlock = (block?: typeof currentBlock) => {
-				if (block) {
-					if (block.type === "text") {
-						stream.push({
-							type: "text_end",
-							contentIndex: blockIndex(),
-							content: block.text,
-							partial: output,
-						});
-					} else if (block.type === "thinking") {
-						stream.push({
-							type: "thinking_end",
-							contentIndex: blockIndex(),
-							content: block.thinking,
-							partial: output,
-						});
-					} else if (block.type === "toolCall") {
-						block.arguments = parseStreamingJson(block.partialArgs);
-						delete block.partialArgs;
-						stream.push({
-							type: "toolcall_end",
-							contentIndex: blockIndex(),
-							toolCall: block,
-							partial: output,
-						});
-					}
-				}
-			};
-
-			for await (const chunk of openaiStream) {
-				if (chunk.usage) {
-					const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
-					const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
-					const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
-					const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
-					output.usage = {
-						// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
-						input,
-						output: outputTokens,
-						cacheRead: cachedTokens,
-						cacheWrite: 0,
-						// Compute totalTokens ourselves since we add reasoning_tokens to output
-						// and some providers (e.g., Groq) don't include them in total_tokens
-						totalTokens: input + outputTokens + cachedTokens,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
-				}
-
-				const choice = chunk.choices?.[0];
-				if (!choice) continue;
-
-				if (choice.finish_reason) {
-					output.stopReason = mapStopReason(choice.finish_reason);
-				}
-
-				if (choice.delta) {
-					if (
-						choice.delta.content !== null &&
-						choice.delta.content !== undefined &&
-						choice.delta.content.length > 0
-					) {
-						if (!currentBlock || currentBlock.type !== "text") {
-							finishCurrentBlock(currentBlock);
-							currentBlock = { type: "text", text: "" };
-							output.content.push(currentBlock);
-							stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-						}
-
-						if (currentBlock.type === "text") {
-							currentBlock.text += choice.delta.content;
+				let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
+				const blocks = output.content;
+				const blockIndex = () => blocks.length - 1;
+				const finishCurrentBlock = (block?: typeof currentBlock) => {
+					if (block) {
+						if (block.type === "text") {
 							stream.push({
-								type: "text_delta",
+								type: "text_end",
 								contentIndex: blockIndex(),
-								delta: choice.delta.content,
+								content: block.text,
+								partial: output,
+							});
+						} else if (block.type === "thinking") {
+							stream.push({
+								type: "thinking_end",
+								contentIndex: blockIndex(),
+								content: block.thinking,
+								partial: output,
+							});
+						} else if (block.type === "toolCall") {
+							block.arguments = parseStreamingJson(block.partialArgs);
+							delete block.partialArgs;
+							stream.push({
+								type: "toolcall_end",
+								contentIndex: blockIndex(),
+								toolCall: block,
 								partial: output,
 							});
 						}
 					}
+				};
 
-					// Some endpoints return reasoning in reasoning_content (llama.cpp),
-					// or reasoning (other openai compatible endpoints)
-					// Use the first non-empty reasoning field to avoid duplication
-					// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
-					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
-					let foundReasoningField: string | null = null;
-					for (const field of reasoningFields) {
+				for await (const chunk of openaiStream) {
+					if (chunk.usage) {
+						const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+						const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
+						const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
+						const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
+						output.usage = {
+							// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
+							input,
+							output: outputTokens,
+							cacheRead: cachedTokens,
+							cacheWrite: 0,
+							// Compute totalTokens ourselves since we add reasoning_tokens to output
+							// and some providers (e.g., Groq) don't include them in total_tokens
+							totalTokens: input + outputTokens + cachedTokens,
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
+						};
+						calculateCost(model, output.usage);
+					}
+
+					const choice = chunk.choices?.[0];
+					if (!choice) continue;
+
+					if (choice.finish_reason) {
+						output.stopReason = mapStopReason(choice.finish_reason);
+					}
+
+					if (choice.delta) {
 						if (
-							(choice.delta as any)[field] !== null &&
-							(choice.delta as any)[field] !== undefined &&
-							(choice.delta as any)[field].length > 0
+							choice.delta.content !== null &&
+							choice.delta.content !== undefined &&
+							choice.delta.content.length > 0
 						) {
-							if (!foundReasoningField) {
-								foundReasoningField = field;
-								break;
+							if (!currentBlock || currentBlock.type !== "text") {
+								finishCurrentBlock(currentBlock);
+								currentBlock = { type: "text", text: "" };
+								output.content.push(currentBlock);
+								stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+							}
+
+							if (currentBlock.type === "text") {
+								currentBlock.text += choice.delta.content;
+								stream.push({
+									type: "text_delta",
+									contentIndex: blockIndex(),
+									delta: choice.delta.content,
+									partial: output,
+								});
 							}
 						}
-					}
 
-					if (foundReasoningField) {
-						if (!currentBlock || currentBlock.type !== "thinking") {
-							finishCurrentBlock(currentBlock);
-							currentBlock = {
-								type: "thinking",
-								thinking: "",
-								thinkingSignature: foundReasoningField,
-							};
-							output.content.push(currentBlock);
-							stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-						}
-
-						if (currentBlock.type === "thinking") {
-							const delta = (choice.delta as any)[foundReasoningField];
-							currentBlock.thinking += delta;
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: blockIndex(),
-								delta,
-								partial: output,
-							});
-						}
-					}
-
-					if (choice?.delta?.tool_calls) {
-						for (const toolCall of choice.delta.tool_calls) {
+						// Some endpoints return reasoning in reasoning_content (llama.cpp),
+						// or reasoning (other openai compatible endpoints)
+						// Use the first non-empty reasoning field to avoid duplication
+						// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
+						const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+						let foundReasoningField: string | null = null;
+						for (const field of reasoningFields) {
 							if (
-								!currentBlock ||
-								currentBlock.type !== "toolCall" ||
-								(toolCall.id && currentBlock.id !== toolCall.id)
+								(choice.delta as any)[field] !== null &&
+								(choice.delta as any)[field] !== undefined &&
+								(choice.delta as any)[field].length > 0
 							) {
+								if (!foundReasoningField) {
+									foundReasoningField = field;
+									break;
+								}
+							}
+						}
+
+						if (foundReasoningField) {
+							if (!currentBlock || currentBlock.type !== "thinking") {
 								finishCurrentBlock(currentBlock);
 								currentBlock = {
-									type: "toolCall",
-									id: toolCall.id || "",
-									name: toolCall.function?.name || "",
-									arguments: {},
-									partialArgs: "",
+									type: "thinking",
+									thinking: "",
+									thinkingSignature: foundReasoningField,
 								};
 								output.content.push(currentBlock);
-								stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+								stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 							}
 
-							if (currentBlock.type === "toolCall") {
-								if (toolCall.id) currentBlock.id = toolCall.id;
-								if (toolCall.function?.name) currentBlock.name = toolCall.function.name;
-								let delta = "";
-								if (toolCall.function?.arguments) {
-									delta = toolCall.function.arguments;
-									currentBlock.partialArgs += toolCall.function.arguments;
-									currentBlock.arguments = parseStreamingJson(currentBlock.partialArgs);
-								}
+							if (currentBlock.type === "thinking") {
+								const delta = (choice.delta as any)[foundReasoningField];
+								currentBlock.thinking += delta;
 								stream.push({
-									type: "toolcall_delta",
+									type: "thinking_delta",
 									contentIndex: blockIndex(),
 									delta,
 									partial: output,
 								});
 							}
 						}
-					}
 
-					const reasoningDetails = (choice.delta as any).reasoning_details;
-					if (reasoningDetails && Array.isArray(reasoningDetails)) {
-						for (const detail of reasoningDetails) {
-							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
-								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
-								) as ToolCall | undefined;
-								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = JSON.stringify(detail);
+						if (choice?.delta?.tool_calls) {
+							for (const toolCall of choice.delta.tool_calls) {
+								if (
+									!currentBlock ||
+									currentBlock.type !== "toolCall" ||
+									(toolCall.id && currentBlock.id !== toolCall.id)
+								) {
+									finishCurrentBlock(currentBlock);
+									currentBlock = {
+										type: "toolCall",
+										id: toolCall.id || "",
+										name: toolCall.function?.name || "",
+										arguments: {},
+										partialArgs: "",
+									};
+									output.content.push(currentBlock);
+									stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+								}
+
+								if (currentBlock.type === "toolCall") {
+									if (toolCall.id) currentBlock.id = toolCall.id;
+									if (toolCall.function?.name) currentBlock.name = toolCall.function.name;
+									let delta = "";
+									if (toolCall.function?.arguments) {
+										delta = toolCall.function.arguments;
+										currentBlock.partialArgs += toolCall.function.arguments;
+										currentBlock.arguments = parseStreamingJson(currentBlock.partialArgs);
+									}
+									stream.push({
+										type: "toolcall_delta",
+										contentIndex: blockIndex(),
+										delta,
+										partial: output,
+									});
+								}
+							}
+						}
+
+						const reasoningDetails = (choice.delta as any).reasoning_details;
+						if (reasoningDetails && Array.isArray(reasoningDetails)) {
+							for (const detail of reasoningDetails) {
+								if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
+									const matchingToolCall = output.content.find(
+										(b) => b.type === "toolCall" && b.id === detail.id,
+									) as ToolCall | undefined;
+									if (matchingToolCall) {
+										matchingToolCall.thoughtSignature = JSON.stringify(detail);
+									}
 								}
 							}
 						}
 					}
 				}
-			}
 
-			finishCurrentBlock(currentBlock);
+				finishCurrentBlock(currentBlock);
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
-		} catch (error) {
-			// Check if we should retry
-			const isAborted = options?.signal?.aborted;
-			if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
-				const delayMs = Math.min(
-					OPENAI_BASE_DELAY_MS * Math.pow(2, attempt),
-					options?.maxRetryDelayMs ?? 60000,
-				);
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				console.warn(
-					`[openai-completions] Retryable error (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${delayMs}ms: ${errorMsg}`,
-				);
-				try {
-					await openAISleep(delayMs, options?.signal);
-				} catch {
-					// Aborted during sleep — fall through to error
-				}
 				if (options?.signal?.aborted) {
-					// Aborted during sleep, don't retry
-				} else {
-					// Reset output state for retry
-					output.content = [];
-					output.usage = {
-						input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					};
-					output.stopReason = "stop";
-					output.errorMessage = undefined;
-					output.timestamp = Date.now();
-					continue;
+					throw new Error("Request was aborted");
 				}
-			}
 
-			for (const block of output.content) delete (block as any).index;
-			output.stopReason = isAborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
-			return;
-		}
-		// Success — break out of retry loop
-		break;
+				if (output.stopReason === "aborted" || output.stopReason === "error") {
+					throw new Error("An unknown error occurred");
+				}
+
+				stream.push({ type: "done", reason: output.stopReason, message: output });
+				stream.end();
+			} catch (error) {
+				// Check if we should retry
+				const isAborted = options?.signal?.aborted;
+				if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
+					const delayMs = Math.min(OPENAI_BASE_DELAY_MS * 2 ** attempt, options?.maxRetryDelayMs ?? 60000);
+					const errorMsg = error instanceof Error ? error.message : String(error);
+					console.warn(
+						`[openai-completions] Retryable error (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${delayMs}ms: ${errorMsg}`,
+					);
+					try {
+						await openAISleep(delayMs, options?.signal);
+					} catch {
+						// Aborted during sleep — fall through to error
+					}
+					if (options?.signal?.aborted) {
+						// Aborted during sleep, don't retry
+					} else {
+						// Reset output state for retry
+						output.content = [];
+						output.usage = {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						};
+						output.stopReason = "stop";
+						output.errorMessage = undefined;
+						output.timestamp = Date.now();
+						continue;
+					}
+				}
+
+				for (const block of output.content) delete (block as any).index;
+				output.stopReason = isAborted ? "aborted" : "error";
+				output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+				// Some providers via OpenRouter give additional information in this field.
+				const rawMetadata = (error as any)?.error?.metadata?.raw;
+				if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+				stream.push({ type: "error", reason: output.stopReason, error: output });
+				stream.end();
+				return;
+			}
+			// Success — break out of retry loop
+			break;
 		}
 	})();
 
