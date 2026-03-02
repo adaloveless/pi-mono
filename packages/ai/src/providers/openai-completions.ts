@@ -102,8 +102,8 @@ function isOpenAIRetryableError(error: unknown): boolean {
 	if (/rate.?limit|overloaded|service.?unavailable|resource.?exhausted|server error|internal error/i.test(message))
 		return true;
 
-	// LM Studio model crash (prompt cache bug, OOM, etc.)
-	if (/model has crashed|exit code/i.test(message)) return true;
+	// LM Studio: model crash, unload, or not ready
+	if (/model has crashed|exit code|model.?unloaded|no model|not loaded|model not found/i.test(message)) return true;
 
 	return false;
 }
