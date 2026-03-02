@@ -104,7 +104,8 @@ const AGENT_LOOP_RETRY_DELAYS = [5000, 15000]; // 5s, 15s
 
 function isAgentRetryableError(errorMessage?: string): boolean {
 	if (!errorMessage) return false;
-	return /ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENETUNREACH|socket hang up|network|fetch failed|connection.*(reset|refused|closed|terminated|aborted)|other side closed|server error|internal error|model has crashed|exit code|model.?unloaded|no model|not loaded|model not found|502|503|504/i.test(
+	if (/model not found/i.test(errorMessage)) return false;
+	return /ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENETUNREACH|socket hang up|network|fetch failed|connection.*(reset|refused|closed|terminated|aborted)|other side closed|server error|internal error|model has crashed|exit code|model.?unloaded|no model|not loaded|502|503|504/i.test(
 		errorMessage,
 	);
 }

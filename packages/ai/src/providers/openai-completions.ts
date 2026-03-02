@@ -102,8 +102,9 @@ function isOpenAIRetryableError(error: unknown): boolean {
 	if (/rate.?limit|overloaded|service.?unavailable|resource.?exhausted|server error|internal error/i.test(message))
 		return true;
 
-	// LM Studio: model crash, unload, or not ready
-	if (/model has crashed|exit code|model.?unloaded|no model|not loaded|model not found/i.test(message)) return true;
+	// LM Studio: model crash, unload, or not ready (NOT "model not found" — that's a config error)
+	if (/model not found/i.test(message)) return false;
+	if (/model has crashed|exit code|model.?unloaded|no model|not loaded/i.test(message)) return true;
 
 	return false;
 }
