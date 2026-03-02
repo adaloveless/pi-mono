@@ -76,37 +76,17 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 }
 
 // Retry configuration
-const OPENAI_MAX_RETRIES = 3;
-const OPENAI_BASE_DELAY_MS = 1000;
+// For local models (LM Studio) on burdened hardware, model crashes are frequent
+// and recoverable — the model just needs time to reload. Never give up.
+const OPENAI_MAX_RETRIES = 100; // effectively unlimited for local models
+const OPENAI_BASE_DELAY_MS = 5000; // start at 5s — model crash recovery takes time
+const OPENAI_MODEL_CRASH_DELAY_MS = 30000; // 30s extra wait after model crash
 
 function isOpenAIRetryableError(error: unknown): boolean {
 	if (!error) return false;
-	const message = error instanceof Error ? error.message : String(error);
-	const status = (error as any)?.status || (error as any)?.statusCode || 0;
-
-	// Non-retryable HTTP statuses
-	if (status === 400 || status === 401 || status === 403 || status === 404) return false;
-
-	// Retryable HTTP statuses
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) return true;
-
-	// Connection/network errors (LM Studio crash, model reloading, etc.)
-	if (
-		/ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|socket hang up|network|fetch failed|other side closed|connection.*(reset|refused|closed|terminated|aborted)/i.test(
-			message,
-		)
-	)
-		return true;
-
-	// Server-side errors
-	if (/rate.?limit|overloaded|service.?unavailable|resource.?exhausted|server error|internal error/i.test(message))
-		return true;
-
-	// LM Studio: model crash, unload, or not ready (NOT "model not found" — that's a config error)
-	if (/model not found/i.test(message)) return false;
-	if (/model has crashed|exit code|model.?unloaded|no model|not loaded/i.test(message)) return true;
-
-	return false;
+	// Retry on ALL errors. Local models on burdened hardware can fail in
+	// unpredictable ways — just keep trying until the model comes back.
+	return true;
 }
 
 function openAISleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -364,10 +344,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Check if we should retry
 				const isAborted = options?.signal?.aborted;
 				if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
-					const delayMs = Math.min(OPENAI_BASE_DELAY_MS * 2 ** attempt, options?.maxRetryDelayMs ?? 60000);
 					const errorMsg = error instanceof Error ? error.message : String(error);
+					// Model crashes need extra recovery time (model reloading into VRAM)
+					const isModelCrash = /model has crashed|exit code|model.?unloaded|not loaded/i.test(errorMsg);
+					const baseDelay = isModelCrash ? OPENAI_MODEL_CRASH_DELAY_MS : OPENAI_BASE_DELAY_MS;
+					const maxDelay = isModelCrash ? 120000 : (options?.maxRetryDelayMs ?? 60000);
+					const delayMs = Math.min(baseDelay * 2 ** Math.min(attempt, 5), maxDelay);
 					console.warn(
-						`[openai-completions] Retryable error (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${delayMs}ms: ${errorMsg}`,
+						`[openai-completions] ${isModelCrash ? "Model crash" : "Retryable error"} (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorMsg}`,
 					);
 					try {
 						await openAISleep(delayMs, options?.signal);
