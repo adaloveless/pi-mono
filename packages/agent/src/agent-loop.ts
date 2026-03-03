@@ -148,6 +148,36 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+// Agent-loop level retry configuration (longer delays for model reload scenarios)
+const AGENT_LOOP_MAX_RETRIES = 2;
+const AGENT_LOOP_RETRY_DELAYS = [5000, 15000]; // 5s, 15s
+
+function isAgentRetryableError(errorMessage?: string): boolean {
+	if (!errorMessage) return false;
+	if (/model not found/i.test(errorMessage)) return false;
+	return /ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENETUNREACH|socket hang up|network|fetch failed|connection.*(reset|refused|closed|terminated|aborted)|other side closed|server error|internal error|model has crashed|exit code|model.?unloaded|no model|not loaded|502|503|504/i.test(
+		errorMessage,
+	);
+}
+
+function agentSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				reject(new Error("aborted"));
+			},
+			{ once: true },
+		);
+	});
+}
+
 /**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
@@ -215,11 +245,57 @@ async function runLoop(
 				}
 			}
 
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, stream, streamFn);
+			// Stream assistant response with agent-level retry for recoverable errors
+			let message = await streamAssistantResponse(currentContext, config, signal, stream, streamFn);
 			newMessages.push(message);
 
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
+			if (message.stopReason === "error" && !signal?.aborted) {
+				const errorMsg = message.errorMessage;
+				if (isAgentRetryableError(errorMsg)) {
+					let recovered = false;
+					for (let retry = 0; retry < AGENT_LOOP_MAX_RETRIES; retry++) {
+						const delayMs = AGENT_LOOP_RETRY_DELAYS[retry];
+						console.warn(
+							`[agent-loop] Retryable LLM error (retry ${retry + 1}/${AGENT_LOOP_MAX_RETRIES}), waiting ${delayMs}ms: ${errorMsg}`,
+						);
+						try {
+							await agentSleep(delayMs, signal);
+						} catch {
+							break; // Aborted during sleep
+						}
+						if (signal?.aborted) break;
+
+						// Remove the failed assistant message from context and newMessages
+						currentContext.messages.pop();
+						newMessages.pop();
+
+						// Retry the LLM call
+						message = await streamAssistantResponse(currentContext, config, signal, stream, streamFn);
+						newMessages.push(message);
+
+						if (message.stopReason !== "error") {
+							recovered = true;
+							break;
+						}
+					}
+
+					if (recovered) {
+						// Fall through to normal processing below
+					} else {
+						// All retries exhausted or aborted
+						stream.push({ type: "turn_end", message, toolResults: [] });
+						stream.push({ type: "agent_end", messages: newMessages });
+						stream.end(newMessages);
+						return;
+					}
+				} else {
+					// Non-retryable error
+					stream.push({ type: "turn_end", message, toolResults: [] });
+					stream.push({ type: "agent_end", messages: newMessages });
+					stream.end(newMessages);
+					return;
+				}
+			} else if (message.stopReason === "aborted") {
 				stream.push({ type: "turn_end", message, toolResults: [] });
 				stream.push({ type: "agent_end", messages: newMessages });
 				stream.end(newMessages);
