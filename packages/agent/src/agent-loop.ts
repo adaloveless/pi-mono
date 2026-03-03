@@ -8,7 +8,9 @@ import {
 	type Context,
 	EventStream,
 	streamSimple,
+	type TextContent,
 	type ToolResultMessage,
+	type UserMessage,
 	validateToolArguments,
 } from "@mariozechner/pi-ai";
 import type {
@@ -20,6 +22,54 @@ import type {
 	AgentToolResult,
 	StreamFn,
 } from "./types.js";
+
+// Repetition loop detection: if the model produces identical responses
+// (or receives identical requests) 5 times in a row, inject a steering
+// message to force a different approach.
+const REPETITION_THRESHOLD = 5;
+
+const REPETITION_STEERING_TEXT =
+	"You appear to be repeating the same response or approach multiple times. " +
+	"This strategy is not working. Please try a completely different approach. " +
+	"Consider alternative tools, different arguments, or a different strategy entirely.";
+
+function fingerprintAssistantMessage(message: AssistantMessage): string {
+	const parts: string[] = [];
+	for (const block of message.content) {
+		if (block.type === "text") {
+			parts.push(`text:${block.text}`);
+		} else if (block.type === "toolCall") {
+			parts.push(`tool:${block.name}:${JSON.stringify(block.arguments)}`);
+		}
+		// Skip thinking blocks — they vary even in repeated responses
+	}
+	return parts.join("\n");
+}
+
+function fingerprintRequestContext(messages: AgentMessage[]): string {
+	const parts: string[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m.role === "assistant") break;
+		if (m.role === "user") {
+			const content =
+				typeof m.content === "string"
+					? m.content
+					: m.content
+							.filter((c): c is TextContent => c.type === "text")
+							.map((c) => c.text)
+							.join("");
+			parts.unshift(`user:${content}`);
+		} else if (m.role === "toolResult") {
+			const textContent = m.content
+				.filter((c): c is TextContent => c.type === "text")
+				.map((c) => c.text)
+				.join("");
+			parts.unshift(`toolResult:${m.toolName}:${textContent}:${m.isError}`);
+		}
+	}
+	return parts.join("\n");
+}
 
 /**
  * Start an agent loop with a new prompt message.
@@ -143,6 +193,11 @@ async function runLoop(
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
+	// Repetition loop detection state
+	const responseFingerprints: string[] = [];
+	const requestFingerprints: string[] = [];
+	let repetitionSteeringMessage: UserMessage | null = null;
+
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
 		let hasMoreToolCalls = true;
@@ -165,6 +220,29 @@ async function runLoop(
 					newMessages.push(message);
 				}
 				pendingMessages = [];
+			}
+
+			// Repetition detection: fingerprint the request context before LLM call
+			const requestFp = fingerprintRequestContext(currentContext.messages);
+			requestFingerprints.push(requestFp);
+			if (requestFingerprints.length >= REPETITION_THRESHOLD) {
+				const lastN = requestFingerprints.slice(-REPETITION_THRESHOLD);
+				if (lastN.every((fp) => fp === lastN[0]) && lastN[0] !== "") {
+					console.warn(
+						`[agent-loop] Repetition detected: identical request pattern ${REPETITION_THRESHOLD} times in a row. Injecting steering message.`,
+					);
+					requestFingerprints.length = 0;
+					responseFingerprints.length = 0;
+					const steeringMsg: UserMessage = {
+						role: "user",
+						content: REPETITION_STEERING_TEXT,
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "message_start", message: steeringMsg });
+					stream.push({ type: "message_end", message: steeringMsg });
+					currentContext.messages.push(steeringMsg);
+					newMessages.push(steeringMsg);
+				}
 			}
 
 			// Stream assistant response with agent-level retry for recoverable errors
@@ -224,6 +302,25 @@ async function runLoop(
 				return;
 			}
 
+			// Repetition detection: fingerprint the assistant response
+			const responseFp = fingerprintAssistantMessage(message);
+			responseFingerprints.push(responseFp);
+			if (responseFingerprints.length >= REPETITION_THRESHOLD) {
+				const lastN = responseFingerprints.slice(-REPETITION_THRESHOLD);
+				if (lastN.every((fp) => fp === lastN[0]) && lastN[0] !== "") {
+					console.warn(
+						`[agent-loop] Repetition detected: identical assistant response ${REPETITION_THRESHOLD} times in a row. Injecting steering message.`,
+					);
+					responseFingerprints.length = 0;
+					requestFingerprints.length = 0;
+					repetitionSteeringMessage = {
+						role: "user",
+						content: REPETITION_STEERING_TEXT,
+						timestamp: Date.now(),
+					};
+				}
+			}
+
 			// Check for tool calls
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 			hasMoreToolCalls = toolCalls.length > 0;
@@ -254,6 +351,12 @@ async function runLoop(
 				steeringAfterTools = null;
 			} else {
 				pendingMessages = (await config.getSteeringMessages?.()) || [];
+			}
+
+			// Append repetition steering after normal steering (so it isn't overwritten)
+			if (repetitionSteeringMessage) {
+				pendingMessages.push(repetitionSteeringMessage);
+				repetitionSteeringMessage = null;
 			}
 		}
 

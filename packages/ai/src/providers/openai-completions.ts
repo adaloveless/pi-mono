@@ -139,196 +139,317 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				const client = createClient(model, context, apiKey, options?.headers);
 				const params = buildParams(model, context, options);
 				options?.onPayload?.(params);
-				const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
-				stream.push({ type: "start", partial: output });
 
-				let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
-				const blocks = output.content;
-				const blockIndex = () => blocks.length - 1;
-				const finishCurrentBlock = (block?: typeof currentBlock) => {
-					if (block) {
-						if (block.type === "text") {
-							stream.push({
-								type: "text_end",
-								contentIndex: blockIndex(),
-								content: block.text,
-								partial: output,
-							});
-						} else if (block.type === "thinking") {
-							stream.push({
-								type: "thinking_end",
-								contentIndex: blockIndex(),
-								content: block.thinking,
-								partial: output,
-							});
-						} else if (block.type === "toolCall") {
-							block.arguments = parseStreamingJson(block.partialArgs);
-							delete block.partialArgs;
-							stream.push({
-								type: "toolcall_end",
-								contentIndex: blockIndex(),
-								toolCall: block,
-								partial: output,
-							});
-						}
-					}
-				};
+				const blockIndex = () => output.content.length - 1;
 
-				for await (const chunk of openaiStream) {
-					if (chunk.usage) {
-						const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
-						const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
-						const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
-						const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
-						output.usage = {
-							// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
-							input,
-							output: outputTokens,
-							cacheRead: cachedTokens,
-							cacheWrite: 0,
-							// Compute totalTokens ourselves since we add reasoning_tokens to output
-							// and some providers (e.g., Groq) don't include them in total_tokens
-							totalTokens: input + outputTokens + cachedTokens,
-							cost: {
-								input: 0,
-								output: 0,
-								cacheRead: 0,
-								cacheWrite: 0,
-								total: 0,
-							},
-						};
-						calculateCost(model, output.usage);
-					}
+				if (params.stream) {
+					// ── Streaming path ──
+					const openaiStream = await client.chat.completions.create(
+						{ ...params, stream: true } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+						{ signal: options?.signal },
+					);
+					stream.push({ type: "start", partial: output });
 
-					const choice = chunk.choices?.[0];
-					if (!choice) continue;
-
-					if (choice.finish_reason) {
-						output.stopReason = mapStopReason(choice.finish_reason);
-					}
-
-					if (choice.delta) {
-						if (
-							choice.delta.content !== null &&
-							choice.delta.content !== undefined &&
-							choice.delta.content.length > 0
-						) {
-							if (!currentBlock || currentBlock.type !== "text") {
-								finishCurrentBlock(currentBlock);
-								currentBlock = { type: "text", text: "" };
-								output.content.push(currentBlock);
-								stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-							}
-
-							if (currentBlock.type === "text") {
-								currentBlock.text += choice.delta.content;
+					let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
+					const finishCurrentBlock = (block?: typeof currentBlock) => {
+						if (block) {
+							if (block.type === "text") {
 								stream.push({
-									type: "text_delta",
+									type: "text_end",
 									contentIndex: blockIndex(),
-									delta: choice.delta.content,
+									content: block.text,
+									partial: output,
+								});
+							} else if (block.type === "thinking") {
+								stream.push({
+									type: "thinking_end",
+									contentIndex: blockIndex(),
+									content: block.thinking,
+									partial: output,
+								});
+							} else if (block.type === "toolCall") {
+								block.arguments = parseStreamingJson(block.partialArgs);
+								delete block.partialArgs;
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: blockIndex(),
+									toolCall: block,
 									partial: output,
 								});
 							}
 						}
+					};
 
-						// Some endpoints return reasoning in reasoning_content (llama.cpp),
-						// or reasoning (other openai compatible endpoints)
-						// Use the first non-empty reasoning field to avoid duplication
-						// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
-						const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
-						let foundReasoningField: string | null = null;
-						for (const field of reasoningFields) {
+					for await (const chunk of openaiStream) {
+						if (chunk.usage) {
+							const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+							const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
+							const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
+							const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
+							output.usage = {
+								// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
+								input,
+								output: outputTokens,
+								cacheRead: cachedTokens,
+								cacheWrite: 0,
+								// Compute totalTokens ourselves since we add reasoning_tokens to output
+								// and some providers (e.g., Groq) don't include them in total_tokens
+								totalTokens: input + outputTokens + cachedTokens,
+								cost: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									total: 0,
+								},
+							};
+							calculateCost(model, output.usage);
+						}
+
+						const choice = chunk.choices?.[0];
+						if (!choice) continue;
+
+						if (choice.finish_reason) {
+							output.stopReason = mapStopReason(choice.finish_reason);
+						}
+
+						if (choice.delta) {
 							if (
-								(choice.delta as any)[field] !== null &&
-								(choice.delta as any)[field] !== undefined &&
-								(choice.delta as any)[field].length > 0
+								choice.delta.content !== null &&
+								choice.delta.content !== undefined &&
+								choice.delta.content.length > 0
 							) {
-								if (!foundReasoningField) {
-									foundReasoningField = field;
-									break;
+								if (!currentBlock || currentBlock.type !== "text") {
+									finishCurrentBlock(currentBlock);
+									currentBlock = { type: "text", text: "" };
+									output.content.push(currentBlock);
+									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+								}
+
+								if (currentBlock.type === "text") {
+									currentBlock.text += choice.delta.content;
+									stream.push({
+										type: "text_delta",
+										contentIndex: blockIndex(),
+										delta: choice.delta.content,
+										partial: output,
+									});
 								}
 							}
-						}
 
-						if (foundReasoningField) {
-							if (!currentBlock || currentBlock.type !== "thinking") {
-								finishCurrentBlock(currentBlock);
-								currentBlock = {
-									type: "thinking",
-									thinking: "",
-									thinkingSignature: foundReasoningField,
-								};
-								output.content.push(currentBlock);
-								stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-							}
-
-							if (currentBlock.type === "thinking") {
-								const delta = (choice.delta as any)[foundReasoningField];
-								currentBlock.thinking += delta;
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: blockIndex(),
-									delta,
-									partial: output,
-								});
-							}
-						}
-
-						if (choice?.delta?.tool_calls) {
-							for (const toolCall of choice.delta.tool_calls) {
+							// Some endpoints return reasoning in reasoning_content (llama.cpp),
+							// or reasoning (other openai compatible endpoints)
+							// Use the first non-empty reasoning field to avoid duplication
+							// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
+							const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+							let foundReasoningField: string | null = null;
+							for (const field of reasoningFields) {
 								if (
-									!currentBlock ||
-									currentBlock.type !== "toolCall" ||
-									(toolCall.id && currentBlock.id !== toolCall.id)
+									(choice.delta as any)[field] !== null &&
+									(choice.delta as any)[field] !== undefined &&
+									(choice.delta as any)[field].length > 0
 								) {
+									if (!foundReasoningField) {
+										foundReasoningField = field;
+										break;
+									}
+								}
+							}
+
+							if (foundReasoningField) {
+								if (!currentBlock || currentBlock.type !== "thinking") {
 									finishCurrentBlock(currentBlock);
 									currentBlock = {
-										type: "toolCall",
-										id: toolCall.id || "",
-										name: toolCall.function?.name || "",
-										arguments: {},
-										partialArgs: "",
+										type: "thinking",
+										thinking: "",
+										thinkingSignature: foundReasoningField,
 									};
 									output.content.push(currentBlock);
-									stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 								}
 
-								if (currentBlock.type === "toolCall") {
-									if (toolCall.id) currentBlock.id = toolCall.id;
-									if (toolCall.function?.name) currentBlock.name = toolCall.function.name;
-									let delta = "";
-									if (toolCall.function?.arguments) {
-										delta = toolCall.function.arguments;
-										currentBlock.partialArgs += toolCall.function.arguments;
-										currentBlock.arguments = parseStreamingJson(currentBlock.partialArgs);
-									}
+								if (currentBlock.type === "thinking") {
+									const delta = (choice.delta as any)[foundReasoningField];
+									currentBlock.thinking += delta;
 									stream.push({
-										type: "toolcall_delta",
+										type: "thinking_delta",
 										contentIndex: blockIndex(),
 										delta,
 										partial: output,
 									});
 								}
 							}
-						}
 
-						const reasoningDetails = (choice.delta as any).reasoning_details;
-						if (reasoningDetails && Array.isArray(reasoningDetails)) {
-							for (const detail of reasoningDetails) {
-								if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
-									const matchingToolCall = output.content.find(
-										(b) => b.type === "toolCall" && b.id === detail.id,
-									) as ToolCall | undefined;
-									if (matchingToolCall) {
-										matchingToolCall.thoughtSignature = JSON.stringify(detail);
+							if (choice?.delta?.tool_calls) {
+								for (const toolCall of choice.delta.tool_calls) {
+									if (
+										!currentBlock ||
+										currentBlock.type !== "toolCall" ||
+										(toolCall.id && currentBlock.id !== toolCall.id)
+									) {
+										finishCurrentBlock(currentBlock);
+										currentBlock = {
+											type: "toolCall",
+											id: toolCall.id || "",
+											name: toolCall.function?.name || "",
+											arguments: {},
+											partialArgs: "",
+										};
+										output.content.push(currentBlock);
+										stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+									}
+
+									if (currentBlock.type === "toolCall") {
+										if (toolCall.id) currentBlock.id = toolCall.id;
+										if (toolCall.function?.name) currentBlock.name = toolCall.function.name;
+										let delta = "";
+										if (toolCall.function?.arguments) {
+											delta = toolCall.function.arguments;
+											currentBlock.partialArgs += toolCall.function.arguments;
+											currentBlock.arguments = parseStreamingJson(currentBlock.partialArgs);
+										}
+										stream.push({
+											type: "toolcall_delta",
+											contentIndex: blockIndex(),
+											delta,
+											partial: output,
+										});
+									}
+								}
+							}
+
+							const reasoningDetails = (choice.delta as any).reasoning_details;
+							if (reasoningDetails && Array.isArray(reasoningDetails)) {
+								for (const detail of reasoningDetails) {
+									if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
+										const matchingToolCall = output.content.find(
+											(b) => b.type === "toolCall" && b.id === detail.id,
+										) as ToolCall | undefined;
+										if (matchingToolCall) {
+											matchingToolCall.thoughtSignature = JSON.stringify(detail);
+										}
 									}
 								}
 							}
 						}
 					}
-				}
 
-				finishCurrentBlock(currentBlock);
+					finishCurrentBlock(currentBlock);
+				} else {
+					// ── Non-streaming path ──
+					const completion = await client.chat.completions.create(
+						params as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+						{ signal: options?.signal },
+					);
+					stream.push({ type: "start", partial: output });
+
+					// Handle usage
+					if (completion.usage) {
+						const cachedTokens = completion.usage.prompt_tokens_details?.cached_tokens || 0;
+						const reasoningTokens = completion.usage.completion_tokens_details?.reasoning_tokens || 0;
+						const input = (completion.usage.prompt_tokens || 0) - cachedTokens;
+						const outputTokens = (completion.usage.completion_tokens || 0) + reasoningTokens;
+						output.usage = {
+							input,
+							output: outputTokens,
+							cacheRead: cachedTokens,
+							cacheWrite: 0,
+							totalTokens: input + outputTokens + cachedTokens,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						};
+						calculateCost(model, output.usage);
+					}
+
+					const choice = completion.choices?.[0];
+					if (choice) {
+						if (choice.finish_reason) {
+							output.stopReason = mapStopReason(choice.finish_reason);
+						}
+
+						const msg = choice.message;
+
+						// Handle reasoning content (llama.cpp, LM Studio, etc.)
+						const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+						for (const field of reasoningFields) {
+							const reasoning = (msg as any)[field];
+							if (reasoning && reasoning.length > 0) {
+								const thinkingBlock: ThinkingContent = {
+									type: "thinking",
+									thinking: reasoning,
+									thinkingSignature: field,
+								};
+								output.content.push(thinkingBlock);
+								stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+								stream.push({
+									type: "thinking_delta",
+									contentIndex: blockIndex(),
+									delta: reasoning,
+									partial: output,
+								});
+								stream.push({
+									type: "thinking_end",
+									contentIndex: blockIndex(),
+									content: reasoning,
+									partial: output,
+								});
+								break;
+							}
+						}
+
+						// Handle text content
+						if (msg.content) {
+							const textBlock: TextContent = { type: "text", text: msg.content };
+							output.content.push(textBlock);
+							stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+							stream.push({
+								type: "text_delta",
+								contentIndex: blockIndex(),
+								delta: msg.content,
+								partial: output,
+							});
+							stream.push({
+								type: "text_end",
+								contentIndex: blockIndex(),
+								content: msg.content,
+								partial: output,
+							});
+						}
+
+						// Handle tool calls
+						if (msg.tool_calls) {
+							for (const tc of msg.tool_calls) {
+								const fn = (tc as any).function;
+								if (!fn) continue;
+								let parsedArgs: Record<string, any> = {};
+								try {
+									parsedArgs = JSON.parse(fn.arguments || "{}");
+								} catch {
+									parsedArgs = {};
+								}
+								const toolCallBlock: ToolCall = {
+									type: "toolCall",
+									id: tc.id || "",
+									name: fn.name || "",
+									arguments: parsedArgs,
+								};
+								output.content.push(toolCallBlock);
+								stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+								stream.push({
+									type: "toolcall_delta",
+									contentIndex: blockIndex(),
+									delta: fn.arguments || "",
+									partial: output,
+								});
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: blockIndex(),
+									toolCall: toolCallBlock,
+									partial: output,
+								});
+							}
+						}
+					}
+				}
 
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
@@ -452,6 +573,7 @@ function createClient(
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
+		timeout: 0, // Disable timeout (0 = no timeout)
 	});
 }
 
@@ -460,10 +582,10 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	const messages = convertMessages(model, context, compat);
 	maybeAddOpenRouterAnthropicCacheControl(model, messages);
 
-	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
+	const params: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
 		model: model.id,
 		messages,
-		stream: true,
+		stream: false,
 	};
 
 	if (compat.supportsUsageInStreaming !== false) {
