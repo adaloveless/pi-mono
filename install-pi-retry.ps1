@@ -2,12 +2,12 @@
 #  Install Pi with LLM retry resilience (adaloveless fork)
 #
 #  Prerequisites: Node.js >= 20, npm, git
-#  Run in PowerShell: irm https://raw.githubusercontent.com/adaloveless/pi-mono/feat/llm-retry-resilience/install-pi-retry.ps1 | iex
+#  Run in PowerShell: irm https://raw.githubusercontent.com/adaloveless/pi-mono/main/install-pi-retry.ps1 | iex
 # ============================================================
 
 $ErrorActionPreference = "Stop"
 $InstallDir = "$env:USERPROFILE\pi-mono"
-$Branch = "feat/llm-retry-resilience"
+$Branch = "main"
 $Repo = "https://github.com/adaloveless/pi-mono.git"
 
 Write-Host ""
