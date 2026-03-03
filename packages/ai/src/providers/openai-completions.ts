@@ -378,6 +378,7 @@ function createClient(
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
+		timeout: 0, // Disable timeout (0 = no timeout)
 	});
 }
 
