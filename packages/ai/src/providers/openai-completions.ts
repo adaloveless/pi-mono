@@ -389,7 +389,7 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
 		messages,
-		stream: true,
+		stream: false,
 	};
 
 	if (compat.supportsUsageInStreaming !== false) {
