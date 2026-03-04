@@ -7,6 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	logRetryError,
 	streamSimple,
 	type TextContent,
 	type ToolResultMessage,
@@ -255,8 +256,9 @@ async function runLoop(
 					let recovered = false;
 					for (let retry = 0; retry < AGENT_LOOP_MAX_RETRIES; retry++) {
 						const delayMs = AGENT_LOOP_RETRY_DELAYS[retry];
-						console.warn(
-							`[agent-loop] Retryable LLM error (retry ${retry + 1}/${AGENT_LOOP_MAX_RETRIES}), waiting ${delayMs}ms: ${errorMsg}`,
+						logRetryError(
+							"agent-loop",
+							`Retryable LLM error (retry ${retry + 1}/${AGENT_LOOP_MAX_RETRIES}), waiting ${delayMs}ms: ${errorMsg}`,
 						);
 						try {
 							await agentSleep(delayMs, signal);

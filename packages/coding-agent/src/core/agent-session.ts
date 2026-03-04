@@ -24,7 +24,7 @@ import type {
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import { isContextOverflow, logRetryError, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -2133,6 +2133,11 @@ export class AgentSession {
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
 		});
+
+		logRetryError(
+			"agent-session",
+			`Retryable error (attempt ${this._retryAttempt}/${settings.maxRetries}), retrying in ${Math.round(delayMs / 1000)}s: ${message.errorMessage || "Unknown error"}`,
+		);
 
 		// Remove error message from agent state (keep in session for history)
 		const messages = this.agent.state.messages;

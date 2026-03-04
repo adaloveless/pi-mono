@@ -20,6 +20,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import { logRetryError } from "../utils/retry-logger.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 
 // ============================================================================
@@ -195,6 +196,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					const errorText = await response.text();
 					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+						logRetryError(
+							"openai-codex-responses",
+							`Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorText.slice(0, 200)}`,
+						);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -216,6 +221,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+						logRetryError(
+							"openai-codex-responses",
+							`Network error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${lastError.message}`,
+						);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}

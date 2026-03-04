@@ -30,6 +30,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+import { logRetryError } from "../utils/retry-logger.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -471,8 +472,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					const baseDelay = isModelCrash ? OPENAI_MODEL_CRASH_DELAY_MS : OPENAI_BASE_DELAY_MS;
 					const maxDelay = isModelCrash ? 120000 : (options?.maxRetryDelayMs ?? 60000);
 					const delayMs = Math.min(baseDelay * 2 ** Math.min(attempt, 5), maxDelay);
-					console.warn(
-						`[openai-completions] ${isModelCrash ? "Model crash" : "Retryable error"} (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorMsg}`,
+					logRetryError(
+						"openai-completions",
+						`${isModelCrash ? "Model crash" : "Retryable error"} (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorMsg}`,
 					);
 					try {
 						await openAISleep(delayMs, options?.signal);

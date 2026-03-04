@@ -30,6 +30,7 @@ import {
 	mapToolChoice,
 	retainThoughtSignature,
 } from "./google-shared.js";
+import { logRetryError } from "../utils/retry-logger.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 
 /**
@@ -414,6 +415,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 							);
 						}
 
+						logRetryError(
+							"google-gemini-cli",
+							`Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${extractErrorMessage(errorText)}`,
+						);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -435,6 +440,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+						logRetryError(
+							"google-gemini-cli",
+							`Network error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${lastError.message}`,
+						);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
