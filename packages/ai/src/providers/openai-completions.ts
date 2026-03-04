@@ -139,6 +139,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 				const client = createClient(model, context, apiKey, options?.headers);
 				const params = buildParams(model, context, options);
+				if (attempt === 0) {
+					console.warn(`[openai-completions] Request params: model=${params.model} stream=${params.stream} messages=${params.messages.length} tools=${params.tools?.length ?? 0} baseUrl=${model.baseUrl}`);
+				}
 				options?.onPayload?.(params);
 
 				const blockIndex = () => output.content.length - 1;
@@ -338,10 +341,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					finishCurrentBlock(currentBlock);
 				} else {
 					// ── Non-streaming path ──
+					const reqStart = Date.now();
+					console.warn(`[openai-completions] Non-streaming request to ${model.baseUrl} model=${model.id} attempt=${attempt}`);
 					const completion = await client.chat.completions.create(
 						params as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
 						{ signal: options?.signal },
 					);
+					console.warn(`[openai-completions] Response received in ${Date.now() - reqStart}ms, choices=${completion.choices?.length ?? 0}, finish_reason=${completion.choices?.[0]?.finish_reason ?? "none"}`);
 					stream.push({ type: "start", partial: output });
 
 					// Handle usage
@@ -463,10 +469,18 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end();
 			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				const errorName = error instanceof Error ? error.constructor.name : typeof error;
+				const errorStack = error instanceof Error ? error.stack : undefined;
+				console.error(`[openai-completions] ERROR on attempt ${attempt}: [${errorName}] ${errorMsg}`);
+				if (errorStack) console.error(`[openai-completions] Stack: ${errorStack}`);
+				if ((error as any)?.status) console.error(`[openai-completions] HTTP status: ${(error as any).status}`);
+				if ((error as any)?.code) console.error(`[openai-completions] Error code: ${(error as any).code}`);
+				if ((error as any)?.cause) console.error(`[openai-completions] Cause: ${(error as any).cause}`);
+
 				// Check if we should retry
 				const isAborted = options?.signal?.aborted;
 				if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
-					const errorMsg = error instanceof Error ? error.message : String(error);
 					// Model crashes need extra recovery time (model reloading into VRAM)
 					const isModelCrash = /model has crashed|exit code|model.?unloaded|not loaded/i.test(errorMsg);
 					const baseDelay = isModelCrash ? OPENAI_MODEL_CRASH_DELAY_MS : OPENAI_BASE_DELAY_MS;
