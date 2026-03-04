@@ -595,7 +595,7 @@ function createClient(
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
-		timeout: 10 * 60 * 1000, // 10 minutes — matches SDK default; 0 would mean instant timeout
+		timeout: 24 * 60 * 60 * 1000, // 24 hours — local models can take a long time to respond
 	});
 }
 
