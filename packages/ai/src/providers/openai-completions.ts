@@ -28,9 +28,9 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { logRetryError } from "../utils/retry-logger.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { logRetryError } from "../utils/retry-logger.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -140,7 +140,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				const client = createClient(model, context, apiKey, options?.headers);
 				const params = buildParams(model, context, options);
 				if (attempt === 0) {
-					console.warn(`[openai-completions] Request params: model=${params.model} stream=${params.stream} messages=${params.messages.length} tools=${params.tools?.length ?? 0} baseUrl=${model.baseUrl}`);
+					console.warn(
+						`[openai-completions] Request params: model=${params.model} stream=${params.stream} messages=${params.messages.length} tools=${params.tools?.length ?? 0} baseUrl=${model.baseUrl}`,
+					);
 				}
 				options?.onPayload?.(params);
 
@@ -342,12 +344,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				} else {
 					// ── Non-streaming path ──
 					const reqStart = Date.now();
-					console.warn(`[openai-completions] Non-streaming request to ${model.baseUrl} model=${model.id} attempt=${attempt}`);
+					console.warn(
+						`[openai-completions] Non-streaming request to ${model.baseUrl} model=${model.id} attempt=${attempt}`,
+					);
 					const completion = await client.chat.completions.create(
 						params as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
 						{ signal: options?.signal },
 					);
-					console.warn(`[openai-completions] Response received in ${Date.now() - reqStart}ms, choices=${completion.choices?.length ?? 0}, finish_reason=${completion.choices?.[0]?.finish_reason ?? "none"}`);
+					console.warn(
+						`[openai-completions] Response received in ${Date.now() - reqStart}ms, choices=${completion.choices?.length ?? 0}, finish_reason=${completion.choices?.[0]?.finish_reason ?? "none"}`,
+					);
 					stream.push({ type: "start", partial: output });
 
 					// Handle usage
@@ -589,7 +595,7 @@ function createClient(
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
-		timeout: 0, // Disable timeout (0 = no timeout)
+		timeout: 10 * 60 * 1000, // 10 minutes — matches SDK default; 0 would mean instant timeout
 	});
 }
 
