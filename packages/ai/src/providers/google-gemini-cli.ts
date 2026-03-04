@@ -21,6 +21,7 @@ import type {
 	ToolCall,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { logRetryError } from "../utils/retry-logger.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	convertMessages,
@@ -30,7 +31,6 @@ import {
 	mapToolChoice,
 	retainThoughtSignature,
 } from "./google-shared.js";
-import { logRetryError } from "../utils/retry-logger.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 
 /**
@@ -402,9 +402,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 
 					// Check if retryable
 					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						// Use server-provided delay or exponential backoff
 						const serverDelay = extractRetryDelay(errorText, response);
-						const delayMs = serverDelay ?? BASE_DELAY_MS * 2 ** attempt;
+						const delayMs = serverDelay ?? Math.round(5000 + Math.random() * 5000);
 
 						// Check if server delay exceeds max allowed (default: 60s)
 						const maxDelayMs = options?.maxRetryDelayMs ?? 60000;
@@ -439,7 +438,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli", GoogleGe
 					}
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+						const delayMs = Math.round(5000 + Math.random() * 5000);
 						logRetryError(
 							"google-gemini-cli",
 							`Network error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${lastError.message}`,

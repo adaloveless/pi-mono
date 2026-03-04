@@ -151,7 +151,6 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 
 // Agent-loop level retry configuration (longer delays for model reload scenarios)
 const AGENT_LOOP_MAX_RETRIES = 2;
-const AGENT_LOOP_RETRY_DELAYS = [5000, 15000]; // 5s, 15s
 
 function isAgentRetryableError(errorMessage?: string): boolean {
 	if (!errorMessage) return false;
@@ -255,7 +254,7 @@ async function runLoop(
 				if (isAgentRetryableError(errorMsg)) {
 					let recovered = false;
 					for (let retry = 0; retry < AGENT_LOOP_MAX_RETRIES; retry++) {
-						const delayMs = AGENT_LOOP_RETRY_DELAYS[retry];
+						const delayMs = Math.round(5000 + Math.random() * 5000);
 						logRetryError(
 							"agent-loop",
 							`Retryable LLM error (retry ${retry + 1}/${AGENT_LOOP_MAX_RETRIES}), waiting ${delayMs}ms: ${errorMsg}`,

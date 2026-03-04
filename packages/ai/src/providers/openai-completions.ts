@@ -487,14 +487,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Check if we should retry
 				const isAborted = options?.signal?.aborted;
 				if (!isAborted && attempt < OPENAI_MAX_RETRIES && isOpenAIRetryableError(error)) {
-					// Model crashes need extra recovery time (model reloading into VRAM)
-					const isModelCrash = /model has crashed|exit code|model.?unloaded|not loaded/i.test(errorMsg);
-					const baseDelay = isModelCrash ? OPENAI_MODEL_CRASH_DELAY_MS : OPENAI_BASE_DELAY_MS;
-					const maxDelay = isModelCrash ? 120000 : (options?.maxRetryDelayMs ?? 60000);
-					const delayMs = Math.min(baseDelay * 2 ** Math.min(attempt, 5), maxDelay);
+					const delayMs = Math.round(5000 + Math.random() * 5000);
 					logRetryError(
 						"openai-completions",
-						`${isModelCrash ? "Model crash" : "Retryable error"} (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorMsg}`,
+						`Retryable error (attempt ${attempt + 1}/${OPENAI_MAX_RETRIES}), retrying in ${Math.round(delayMs / 1000)}s: ${errorMsg}`,
 					);
 					try {
 						await openAISleep(delayMs, options?.signal);
