@@ -603,7 +603,7 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
 		model: model.id,
 		messages,
-		stream: false,
+		stream: true,
 	};
 
 	if (compat.supportsUsageInStreaming !== false) {
