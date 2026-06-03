@@ -33,3 +33,7 @@ pi-*.html
 out.html
 packages/coding-agent/binaries/
 todo.md
+
+# Generated / lock files
+package-lock.json
+packages/ai/src/models.generated.ts
